@@ -7,159 +7,114 @@ const xlsx = require('xlsx');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
+const bodyParser = require('body-parser');
+
 
 
 const app = express();
 const port = 4000;
 
+// Middleware untuk mem-parsing JSON
+app.use(bodyParser.json());
+
 // Konfigurasi database
 const sequelize = new Sequelize('CompanyDB', 'sa', 'mulzahrian', {
-    host: 'localhost',
-    dialect: 'mssql'
-  });
-
-// Fungsi untuk mengambil data dari database
-async function getData() {
-    const templatePath = 'FixedQuery.mrt'
-    const report = new Stimulsoft.Report.StiReport();
-    report.loadFile(templatePath);
-
-    const dataSources = report.dictionary.dataSources.list;
-    if (!dataSources || dataSources.length === 0) {
-      throw new Error('No data sources found in the template.');
-    }
-
-    const filter = 'and o.id = 1'
-  
-    // Ambil SqlCommand dari data source pertama
-    const sqlCommand = dataSources[0].sqlCommand;
-    const regData = dataSources[0].alias;
-    console.log('ini ada sorucenya :',regData);
-    const newCommand = sqlCommand + filter;
-    console.log("ini querynya :", newCommand);
-
-
-    const [results, metadata] = await sequelize.query(sqlCommand);
-    return results;
-  }
-
-// Fungsi untuk membuat dan menyimpan laporan dalam format PDF atau Excel
-async function generateAndSaveReport(data, format, templatePath = 'FixedQuery.mrt') {
-    return new Promise((resolve, reject) => {
-      const filter = 'and o.id = 4';
-
-      const report = new Stimulsoft.Report.StiReport();  
-      // Load template
-      report.loadFile(templatePath);
-  
-      const dataSources = report.dictionary.dataSources.list;
-
-    if (!dataSources || dataSources.length === 0) {
-      throw new Error('No data sources found in the template.');
-    }
-
-    // Modifikasi SqlCommand
-    const originalSqlCommand = dataSources[0].sqlCommand;
-    const modifiedSqlCommand = `${originalSqlCommand} ${filter}`;
-
-    // Update SqlCommand
-    dataSources[0].sqlCommand = modifiedSqlCommand;
-    const regData = dataSources[0].alias;
-
-    console.log('Modified SqlCommand:', dataSources[0].sqlCommand);
-
-      // Register data
-      report.regData(regData, data); // Sesuaikan dengan nama data source dalam template
-  
-      // Render report
-      report.renderAsync((renderedReport) => {
-        if (renderedReport) {
-          switch (format) {
-            case 'pdf':
-              report.exportDocumentAsync(
-                (pdfData) => {
-                  const pdfPath = path.join(__dirname, 'laporan.pdf');
-                  Stimulsoft.System.StiObject.saveAs(pdfData, pdfPath, 'application/pdf');
-                  console.log(`Laporan berhasil disimpan sebagai ${pdfPath}`);
-                  resolve(pdfPath);
-                },
-                Stimulsoft.Report.StiExportFormat.Pdf
-              );
-              break;
-            case 'html':
-              const reportHtml = renderedReport.getHtml();
-              resolve(reportHtml);
-              break;
-            case 'excel':
-              report.exportDocumentAsync(
-                (excelData) => {
-                  const workbook = xlsx.read(excelData, { type: 'buffer' });
-                  const excelPath = path.join(__dirname, 'laporan.xlsx');
-                  xlsx.writeFile(workbook, excelPath);
-                  console.log(`Laporan berhasil disimpan sebagai ${excelPath}`);
-                  resolve(excelPath);
-                },
-                Stimulsoft.Report.StiExportFormat.Excel2007
-              );
-              break;
-            default:
-              reject(new Error('Format ekspor tidak valid'));
-          }
-        } else {
-          console.error('Report rendering failed: No rendered report object');
-          reject(new Error('Report rendering failed'));
-        }
-      }, (error) => {
-        console.error('Report rendering error:', error);
-        reject(error);
-      });
-    });
-  }
-
-// Rute untuk mengunduh laporan dalam format PDF atau Excel
-app.get('/download/:format', async (req, res) => {
-  const format = req.params.format;
-  try {
-    const data = await getData();
-    const filePath = await generateAndSaveReport(data, format);
-    res.download(filePath);
-  } catch (error) {
-    console.error('Error generating report:', error);
-    res.status(500).send('Error generating report');
-  }
+  host: 'localhost',
+  dialect: 'mssql'
 });
 
-// API untuk menampilkan laporan sebagai HTML
-app.get('/view', async (req, res) => {
-  try {
-    const templatePath = 'FixedQuery.mrt'; // Path ke template .mrt
-    const report = new Stimulsoft.Report.StiReport();
-    
-    // Load template
-    report.loadFile(templatePath);
+// Middleware untuk memvalidasi template
+function validateTemplate(req, res, next) {
+  const filename = req.params.filename;
+  req.templatePath = path.join(__dirname, 'templates', filename);
 
-    // Ambil data dari database
-    const data = await getData();
+  if (!fs.existsSync(req.templatePath) || path.extname(req.templatePath) !== '.mrt') {
+    return res.status(400).send('File template tidak ditemukan atau format tidak valid.');
+  }
+  next();
+}
 
-    // Registrasi data ke dalam template
-    report.regData('getEmployee', data); // Sesuaikan dengan nama data source dalam template
+// Fungsi untuk memuat template dan mengambil data
+async function loadTemplateAndData(templatePath, filter) {
+  const report = new Stimulsoft.Report.StiReport();
+  report.loadFile(templatePath);
 
-    // Render report
+  const dataSources = report.dictionary.dataSources.list;
+  if (!dataSources || dataSources.length === 0) {
+    throw new Error('No data sources found in the template.');
+  }
+
+  const originalSqlCommand = dataSources[0].sqlCommand;
+
+  // Tambahkan filter ke SQL Command
+  const modifiedSqlCommand = filter ? `${originalSqlCommand} ${filter}` : originalSqlCommand;
+  dataSources[0].sqlCommand = modifiedSqlCommand;
+
+  const [results] = await sequelize.query(modifiedSqlCommand);
+
+  return { report, data: results, alias: dataSources[0].alias };
+}
+
+// Fungsi untuk menghasilkan laporan
+async function generateReport(report, data, alias, format) {
+  return new Promise((resolve, reject) => {
+    report.regData(alias, data);
     report.renderAsync(() => {
-      // Ekspor laporan ke format HTML
-      const reportHtml = report.exportDocument(Stimulsoft.Report.StiExportFormat.Html);
-      res.setHeader('Content-Type', 'text/html');
-      res.send(reportHtml);
-    }, (error) => {
-      console.error('Error rendering report:', error);
-      res.status(500).send('Error rendering report');
-    });
+      switch (format) {
+        case 'pdf':
+          report.exportDocumentAsync((pdfData) => {
+            const filePath = path.join(__dirname, 'laporan.pdf');
+            Stimulsoft.System.StiObject.saveAs(pdfData, filePath, 'application/pdf');
+            resolve(filePath);
+          }, Stimulsoft.Report.StiExportFormat.Pdf);
+          break;
+        case 'html':
+          const htmlData = report.exportDocument(Stimulsoft.Report.StiExportFormat.Html);
+          resolve(htmlData);
+          break;
+        case 'excel':
+          report.exportDocumentAsync((excelData) => {
+            const filePath = path.join(__dirname, 'laporan.xlsx');
+            fs.writeFileSync(filePath, excelData);
+            resolve(filePath);
+          }, Stimulsoft.Report.StiExportFormat.Excel2007);
+          break;
+        default:
+          reject(new Error('Format ekspor tidak valid'));
+      }
+    }, (error) => reject(error));
+  });
+}
+
+// Rute untuk melihat laporan
+app.post('/view/:filename', validateTemplate, async (req, res) => {
+  const filter = req.body.filter; // Ambil filter dari request body
+
+  try {
+    const { report, data, alias } = await loadTemplateAndData(req.templatePath, filter);
+    const htmlData = await generateReport(report, data, alias, 'html');
+    res.setHeader('Content-Type', 'text/html');
+    res.send(htmlData);
   } catch (error) {
     console.error('Error generating view:', error);
     res.status(500).send('Error generating view');
   }
 });
 
+// Rute untuk mengunduh laporan
+app.post('/download/:format/:filename', validateTemplate, async (req, res) => {
+  const format = req.params.format;
+  const filter = req.body.filter; // Ambil filter dari request body
+
+  try {
+    const { report, data, alias } = await loadTemplateAndData(req.templatePath, filter);
+    const filePath = await generateReport(report, data, alias, format);
+    res.download(filePath);
+  } catch (error) {
+    console.error('Error generating report:', error);
+    res.status(500).send('Error generating report');
+  }
+});
 
 // Konfigurasi Multer untuk menyimpan file di folder "templates" dengan nama asli
 const storage = multer.diskStorage({
